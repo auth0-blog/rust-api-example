@@ -32,8 +32,8 @@ struct User {
 
 fn get_data_string(result: MongoResult<Document>) -> Result<Json, String> {
     match result {
-      Ok(doc) => Ok(Bson::Document(doc).to_json()),
-      Err(e) => Err(format!("{}", e))
+        Ok(doc) => Ok(Bson::Document(doc).to_json()),
+        Err(e) => Err(format!("{}", e))
     }
 }
 
