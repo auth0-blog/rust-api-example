@@ -1,15 +1,16 @@
 #[macro_use] 
 extern crate nickel;
-
 extern crate rustc_serialize;
 
 #[macro_use(bson, doc)]
 extern crate bson;
 extern crate mongodb;
+extern crate frank_jwt;
+extern crate hyper;
 
 // Nickel
-use nickel::{Nickel, JsonBody, HttpRouter};
-use nickel::status::StatusCode::{self};
+use nickel::{Nickel, JsonBody, HttpRouter, Request, Response, MiddlewareResult, MediaType};
+use nickel::status::StatusCode::{self, Forbidden};
 
 // MongoDB
 use mongodb::{Client, ThreadedClient};
@@ -23,11 +24,30 @@ use bson::oid::ObjectId;
 // rustc_serialize
 use rustc_serialize::json::{Json, ToJson};
 
+// frank_jwt
+use frank_jwt::Header;
+use frank_jwt::Payload;
+use frank_jwt::encode;
+use frank_jwt::decode;
+use frank_jwt::Algorithm;
+
+// hyper
+use hyper::header;
+use hyper::header::{Authorization, Bearer};
+
 #[derive(RustcDecodable, RustcEncodable)]
 struct User {
     firstname: String,
     lastname: String,
     email: String
+}
+
+static AUTH_SECRET: &'static str = "some_secret_key";
+
+#[derive(RustcDecodable, RustcEncodable)]
+struct UserLogin {
+  email: String,
+  password: String
 }
 
 fn get_data_string(result: MongoResult<Document>) -> Result<Json, String> {
@@ -37,12 +57,75 @@ fn get_data_string(result: MongoResult<Document>) -> Result<Json, String> {
     }
 }
 
+fn authenticator<'mw>(request: &mut Request, response: Response<'mw>, ) -> MiddlewareResult<'mw> {
+
+  // We don't want to apply the middleware to the login route
+  if request.origin.uri.to_string() == "/login".to_string() {
+
+      response.next_middleware()
+
+  } else {
+
+      // Get the full Authorization header from the incoming request headers
+      let auth_header = match request.origin.headers.get::<Authorization<Bearer>>() {
+          Some(header) => header,
+          None => panic!("No authorization header found")
+      };
+
+      // Format the header to only take the value
+      let jwt = header::HeaderFormatter(auth_header).to_string();
+
+      // We don't need the Bearer part, 
+      // so get whatever is after an index of 7
+      let token = &jwt[7..];
+
+      // Decode and check the JWT against the secret
+      match decode(token.to_string(), AUTH_SECRET.to_string(), Algorithm::HS256) {
+          Ok(header) => response.next_middleware(),
+          Err(_) => response.error(Forbidden, "Access denied")
+      }
+  }
+}
+
 fn main() {
 
     let mut server = Nickel::new();
     let mut router = Nickel::router();
 
-    router.get("/users", middleware! { |request, response|
+    server.utilize(authenticator);
+
+    router.post("/login", middleware! { |request|
+
+        // Accept a JSON string that corresponds to the User struct
+        let user = request.json_as::<UserLogin>().unwrap();
+
+        // Get the email and password
+        let email = user.email.to_string();
+        let password = user.password.to_string();
+
+        // Simple password checker
+        if password == "secret".to_string() {
+
+            let mut payload = Payload::new();
+
+            // Add the user's email address to the payload
+            payload.insert("email".to_string(), email);
+
+            let header = Header::new(Algorithm::HS256);
+
+            // Encode the JWT with the header, secret, and payload
+            let jwt = encode(header, AUTH_SECRET.to_string(), payload.clone());
+
+            // Return the JWT string
+            format!("{}", jwt)
+
+        } else {
+            format!("Incorrect username or password")
+        }
+
+    });
+
+    router.get("/users", middleware! { |request, mut response|
 
         // Connect to the database
         let client = Client::connect("localhost", 27017)
@@ -75,6 +158,9 @@ fn main() {
 
         // Close the JSON string
         data_result.push_str("]}");
+
+        // Set the returned type as JSON
+        response.set(MediaType::Json);
 
         // Send back the result
         format!("{}", data_result)
