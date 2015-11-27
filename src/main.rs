@@ -5,8 +5,10 @@ extern crate rustc_serialize;
 #[macro_use(bson, doc)]
 extern crate bson;
 extern crate mongodb;
-extern crate frank_jwt;
 extern crate hyper;
+extern crate crypto;
+extern crate jwt;
+extern crate time;
 
 // Nickel
 use nickel::{Nickel, JsonBody, HttpRouter, Request, Response, MiddlewareResult, MediaType};
@@ -23,17 +25,25 @@ use bson::oid::ObjectId;
 
 // rustc_serialize
 use rustc_serialize::json::{Json, ToJson};
-
-// frank_jwt
-use frank_jwt::Header;
-use frank_jwt::Payload;
-use frank_jwt::encode;
-use frank_jwt::decode;
-use frank_jwt::Algorithm;
+use rustc_serialize::base64;
+use rustc_serialize::base64::{FromBase64};
 
 // hyper
 use hyper::header;
 use hyper::header::{Authorization, Bearer};
+use hyper::method::Method;
+
+// jwt
+use std::default::Default;
+use crypto::sha2::Sha256;
+use jwt::{
+    Header,
+    Registered,
+    Token,
+};
+
+// time
+use time::{Timespec};
 
 #[derive(RustcDecodable, RustcEncodable)]
 struct User {
@@ -42,12 +52,12 @@ struct User {
     email: String
 }
 
-static AUTH_SECRET: &'static str = "some_secret_key";
+static AUTH_SECRET: &'static str = "your_secret_key";
 
 #[derive(RustcDecodable, RustcEncodable)]
 struct UserLogin {
-  email: String,
-  password: String
+    email: String,
+    password: String
 }
 
 fn get_data_string(result: MongoResult<Document>) -> Result<Json, String> {
@@ -59,31 +69,80 @@ fn get_data_string(result: MongoResult<Document>) -> Result<Json, String> {
 
 fn authenticator<'mw>(request: &mut Request, response: Response<'mw>, ) -> MiddlewareResult<'mw> {
 
-  // We don't want to apply the middleware to the login route
-  if request.origin.uri.to_string() == "/login".to_string() {
+  // Check if we are getting an OPTIONS request
+  if request.origin.method.to_string() == "OPTIONS".to_string() {
 
+      // The middleware shouldn't be used for OPTIONS, so continue
       response.next_middleware()
 
   } else {
 
-      // Get the full Authorization header from the incoming request headers
-      let auth_header = match request.origin.headers.get::<Authorization<Bearer>>() {
-          Some(header) => header,
-          None => panic!("No authorization header found")
-      };
+    // We don't want to apply the middleware to the login route
+    if request.origin.uri.to_string() == "/login".to_string() {
 
-      // Format the header to only take the value
-      let jwt = header::HeaderFormatter(auth_header).to_string();
+        response.next_middleware()
 
-      // We don't need the Bearer part, 
-      // so get whatever is after an index of 7
-      let token = &jwt[7..];
+    } else {
 
-      // Decode and check the JWT against the secret
-      match decode(token.to_string(), AUTH_SECRET.to_string(), Algorithm::HS256) {
-          Ok(header) => response.next_middleware(),
-          Err(_) => response.error(Forbidden, "Access denied")
-      }
+        // Get the full Authorization header from the incoming request headers
+        let auth_header = match request.origin.headers.get::<Authorization<Bearer>>() {
+            Some(header) => header,
+            None => panic!("No authorization header found")
+        };
+
+        // Format the header to only take the value
+        let jwt = header::HeaderFormatter(auth_header).to_string();
+
+        // We don't need the Bearer part, 
+        // so get whatever is after an index of 7
+        let jwt_slice = &jwt[7..];
+
+        // Parse the token
+        let token = Token::<Header, Registered>::parse(jwt_slice).unwrap();
+
+        // Get the secret key as bytes
+        let secret = AUTH_SECRET.as_bytes();
+
+        // Generic example
+        // Verify the token
+        if token.verify(&secret, Sha256::new()) {
+          
+            response.next_middleware()         
+          
+        } else {
+
+            response.error(Forbidden, "Access denied")
+
+        }
+
+        // // Auth0 example
+        // let secret = AUTH_SECRET.as_bytes().from_base64().unwrap();        
+
+        // // Verify the token
+        // if token.verify(&secret, Sha256::new()) {
+
+        //     match token.claims.exp {
+        //         Some(exp) =>  {
+
+        //             // Check to make sure the token is not expired
+        //             let x = exp as i64;
+        //             let token_exp = time::Timespec::new(x, 0);
+
+        //             if time::get_time() < token_exp {
+        //                 response.next_middleware()
+        //             } else {
+        //                 response.error(Forbidden, "Token expired")
+        //             }
+        //         },
+                
+        //         None => response.error(Forbidden, "No token expiry claim present")
+        //     }          
+          
+        // } else {
+        //     response.error(Forbidden, "Access denied")
+        // }
+
+    }
   }
 }
 
@@ -106,17 +165,20 @@ fn main() {
         // Simple password checker
         if password == "secret".to_string() {
 
-            let mut payload = Payload::new();
+            let header: Header = Default::default();
 
-            // Add the user's email address to the payload
-            payload.insert("email".to_string(), email);
+            // For the example, we just have one claim
+            // You would also want iss, exp, iat etc
+            let claims = Registered {
+                sub: Some(email.into()),
+                ..Default::default()
+            };
 
-            let header = Header::new(Algorithm::HS256);
+            let token = Token::new(header, claims);
 
-            // Encode the JWT with the header, secret, and payload
-            let jwt = encode(header, AUTH_SECRET.to_string(), payload.clone());
+            // Sign the token
+            let jwt = token.signed(AUTH_SECRET.as_bytes(), Sha256::new()).unwrap();
 
-            // Return the JWT string
             format!("{}", jwt)
 
         } else {
@@ -195,7 +257,7 @@ fn main() {
 
     });
 
-    router.delete("/users/:user_id", middleware! { |request, response|
+    router.delete("/users/:id", middleware! { |request, response|
 
         let client = Client::connect("localhost", 27017)
             .ok().expect("Failed to initialize standalone client.");
@@ -204,10 +266,10 @@ fn main() {
         let coll = client.db("rust-users").collection("users");
 
         // Get the user_id from the request params
-        let user_id = request.param("user_id").unwrap();
+        let object_id = request.param("id").unwrap();
 
         // Match the user id to an bson ObjectId
-        let id = match ObjectId::with_string(user_id) {
+        let id = match ObjectId::with_string(object_id) {
             Ok(oid) => oid,
             Err(e) => return response.send(format!("{}", e))
         };
