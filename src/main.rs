@@ -8,7 +8,6 @@ extern crate mongodb;
 extern crate hyper;
 extern crate crypto;
 extern crate jwt;
-extern crate time;
 
 // Nickel
 use nickel::{Nickel, JsonBody, HttpRouter, Request, Response, MiddlewareResult, MediaType};
@@ -41,9 +40,6 @@ use jwt::{
     Registered,
     Token,
 };
-
-// time
-use time::{Timespec};
 
 #[derive(RustcDecodable, RustcEncodable)]
 struct User {
