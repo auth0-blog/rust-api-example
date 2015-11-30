@@ -115,33 +115,6 @@ fn authenticator<'mw>(request: &mut Request, response: Response<'mw>, ) -> Middl
 
         }
 
-        // // Auth0 example
-        // let secret = AUTH_SECRET.as_bytes().from_base64().unwrap();        
-
-        // // Verify the token
-        // if token.verify(&secret, Sha256::new()) {
-
-        //     match token.claims.exp {
-        //         Some(exp) =>  {
-
-        //             // Check to make sure the token is not expired
-        //             let x = exp as i64;
-        //             let token_exp = time::Timespec::new(x, 0);
-
-        //             if time::get_time() < token_exp {
-        //                 response.next_middleware()
-        //             } else {
-        //                 response.error(Forbidden, "Token expired")
-        //             }
-        //         },
-                
-        //         None => response.error(Forbidden, "No token expiry claim present")
-        //     }          
-          
-        // } else {
-        //     response.error(Forbidden, "Access denied")
-        // }
-
     }
   }
 }
